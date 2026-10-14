@@ -1,0 +1,18 @@
+misconfigurations:
+  - id: AVD-AWS-0132
+    paths:
+      - iac/terraform-modules/aws/s3/main.tf
+    expired_at: 2027-01-15
+    statement: The demo S3 module intentionally uses portable provider-managed AES256 encryption; require a customer-managed KMS design before production use.
+
+  - id: AVD-AWS-0136
+    paths:
+      - iac/terraform-modules/aws/sns/main.tf
+    expired_at: 2027-01-15
+    statement: The demo defaults to the AWS-managed SNS key while allowing callers to supply a customer-managed key; production environments must override it.
+
+  - id: AVD-AZU-0012
+    paths:
+      - iac/terraform-modules/azure/blob-storage/main.tf
+    expired_at: 2027-01-15
+    statement: Public network access is intentional for the public and private-by-anonymity storage examples; production use requires an explicit network-isolation design.

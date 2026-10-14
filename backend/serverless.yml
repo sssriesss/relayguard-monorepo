@@ -1,0 +1,405 @@
+service: relayguard
+frameworkVersion: "3.40.0"
+configValidationMode: warn
+
+plugins:
+  - serverless-localstack
+  - serverless-iam-roles-per-function
+
+custom:
+  localstack:
+    stages:
+      - local
+    host: http://127.0.0.1
+    edgePort: 4566
+    autostart: false
+    lambda:
+      mountCode: false
+  tableName: ${ssm:/relayguard/${sls:stage}/infra/dynamodb/table_name}
+  awsEndpointUrl: ${ssm:/relayguard/${sls:stage}/infra/aws/endpoint_url, ''}
+  tableArn: ${ssm:/relayguard/${sls:stage}/infra/dynamodb/table_arn}
+  streamArn: ${ssm:/relayguard/${sls:stage}/infra/dynamodb/stream_arn}
+  workQueueUrl: ${ssm:/relayguard/${sls:stage}/infra/sqs/work_queue_url}
+  workQueueArn: ${ssm:/relayguard/${sls:stage}/infra/sqs/work_queue_arn}
+  eventBusName: ${ssm:/relayguard/${sls:stage}/infra/eventbridge/bus_name}
+  eventBusArn: ${ssm:/relayguard/${sls:stage}/infra/eventbridge/bus_arn}
+  operationsTopicArn: ${ssm:/relayguard/${sls:stage}/infra/sns/operations_topic_arn}
+  schedulerDlqArn: ${ssm:/relayguard/${sls:stage}/infra/sqs/scheduler_dlq_arn}
+  deploymentBucketName: ${ssm:/relayguard/${sls:stage}/infra/deployment/bucket_name}
+  cloudFormationRoleArn: ${ssm:/relayguard/${sls:stage}/infra/deployment/cloudformation_role_arn}
+  runtimePermissionsBoundaryArn: ${ssm:/relayguard/${sls:stage}/infra/iam/runtime_permissions_boundary_arn}
+  signingSecretArn: ${ssm:/relayguard/${sls:stage}/infra/secrets/webhook_signing_arn}
+  operatorTokenArn: ${ssm:/relayguard/${sls:stage}/infra/secrets/operator_token_arn}
+  outboundTokenArn: ${ssm:/relayguard/${sls:stage}/infra/secrets/outbound_token_arn}
+  allowedEventTypes: ${ssm:/relayguard/${sls:stage}/config/allowed_event_types}
+  externalTargetUrl: ${ssm:/relayguard/${sls:stage}/config/external_target_url}
+  jobRetentionDays: ${ssm:/relayguard/${sls:stage}/config/job_retention_days}
+  stuckAfterMinutes: ${ssm:/relayguard/${sls:stage}/config/stuck_after_minutes}
+  signatureToleranceSeconds: ${ssm:/relayguard/${sls:stage}/config/signature_tolerance_seconds}
+  serverless-iam-roles-per-function:
+    iamGlobalPermissionsBoundary: ${self:custom.runtimePermissionsBoundaryArn}
+
+provider:
+  name: aws
+  runtime: python3.12
+  stage: ${opt:stage, 'local'}
+  region: ${opt:region, 'eu-west-1'}
+  architecture: x86_64
+  memorySize: 256
+  timeout: 15
+  logRetentionInDays: 7
+  versionFunctions: false
+  deploymentMethod: direct
+  deploymentBucket:
+    name: ${self:custom.deploymentBucketName}
+    blockPublicAccess: true
+    skipPolicySetup: true
+    serverSideEncryption: AES256
+  iam:
+    deploymentRole: ${self:custom.cloudFormationRoleArn}
+  environment:
+    AWS_ENDPOINT_URL: ${self:custom.awsEndpointUrl}
+    PYTHONPATH: /var/task/src
+  tags:
+    project: relayguard
+    environment: ${sls:stage}
+    managed_by: serverless
+
+package:
+  individually: true
+  patterns:
+    - "!**"
+    - src/relayguard/**
+    - "!**/__pycache__/**"
+    - "!**/*.pyc"
+
+functions:
+  api:
+    handler: src.relayguard.api.handler
+    reservedConcurrency: 5
+    timeout: 10
+    environment:
+      JOBS_TABLE_NAME: ${self:custom.tableName}
+      SIGNING_SECRET_ARN: ${self:custom.signingSecretArn}
+      OPERATOR_TOKEN_ARN: ${self:custom.operatorTokenArn}
+      ALLOWED_EVENT_TYPES: ${self:custom.allowedEventTypes}
+      JOB_RETENTION_DAYS: ${self:custom.jobRetentionDays}
+      SIGNATURE_TOLERANCE_SECONDS: ${self:custom.signatureToleranceSeconds}
+      MAX_BODY_BYTES: "262144"
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - dynamodb:GetItem
+          - dynamodb:Query
+          - dynamodb:TransactWriteItems
+        Resource:
+          - ${self:custom.tableArn}
+      - Effect: Allow
+        Action: secretsmanager:GetSecretValue
+        Resource:
+          - ${self:custom.signingSecretArn}
+          - ${self:custom.operatorTokenArn}
+    events:
+      - http:
+          method: GET
+          path: /health
+      - http:
+          method: POST
+          path: /v1/webhooks/{source}
+      - http:
+          method: GET
+          path: /v1/jobs/{job_id}
+      - http:
+          method: POST
+          path: /v1/jobs/{job_id}/replay
+
+  outbox:
+    handler: src.relayguard.outbox.handler
+    environment:
+      WORK_QUEUE_URL: ${self:custom.workQueueUrl}
+    iamRoleStatements:
+      - Effect: Allow
+        Action: sqs:SendMessage
+        Resource: ${self:custom.workQueueArn}
+    events:
+      - stream:
+          type: dynamodb
+          arn: ${self:custom.streamArn}
+          batchSize: 10
+          bisectBatchOnFunctionError: true
+          maximumRetryAttempts: 3
+          functionResponseType: ReportBatchItemFailures
+          filterPatterns:
+            - eventName: [INSERT]
+              dynamodb:
+                NewImage:
+                  SK:
+                    S: [PENDING]
+
+  workflowStarter:
+    handler: src.relayguard.workflow_starter.handler
+    environment:
+      JOBS_TABLE_NAME: ${self:custom.tableName}
+      STATE_MACHINE_ARN:
+        Ref: RelayGuardStateMachine
+    iamRoleStatements:
+      - Effect: Allow
+        Action: dynamodb:UpdateItem
+        Resource: ${self:custom.tableArn}
+      - Effect: Allow
+        Action: states:StartExecution
+        Resource:
+          Ref: RelayGuardStateMachine
+    events:
+      - sqs:
+          arn: ${self:custom.workQueueArn}
+          batchSize: 10
+          maximumBatchingWindow: 1
+          functionResponseType: ReportBatchItemFailures
+
+  normalize:
+    handler: src.relayguard.normalize.handler
+    environment:
+      ALLOWED_EVENT_TYPES: ${self:custom.allowedEventTypes}
+
+  deliver:
+    handler: src.relayguard.deliver.handler
+    timeout: 15
+    environment:
+      EXTERNAL_TARGET_URL:
+        Fn::If:
+          - IsLocal
+          - Fn::Join:
+              - ""
+              - - "https://"
+                - Ref: ApiGatewayRestApi
+                - ".execute-api.localhost.localstack.cloud:4566/${sls:stage}/_e2e/destination"
+          - ${self:custom.externalTargetUrl}
+      OUTBOUND_TOKEN_ARN: ${self:custom.outboundTokenArn}
+    iamRoleStatements:
+      - Effect: Allow
+        Action: secretsmanager:GetSecretValue
+        Resource: ${self:custom.outboundTokenArn}
+
+  reconcile:
+    handler: src.relayguard.reconcile.handler
+    timeout: 30
+    environment:
+      JOBS_TABLE_NAME: ${self:custom.tableName}
+      STUCK_AFTER_MINUTES: ${self:custom.stuckAfterMinutes}
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - dynamodb:PutItem
+          - dynamodb:Query
+          - dynamodb:UpdateItem
+        Resource:
+          - ${self:custom.tableArn}
+          - Fn::Join: ["/", ["${self:custom.tableArn}", "index", "status-updated-index"]]
+
+  e2eDestination:
+    handler: tests.e2e.fixtures.retry_destination.handler
+    condition: IsLocal
+    package:
+      patterns:
+        - tests/e2e/fixtures/retry_destination.py
+    environment:
+      E2E_STATE_TABLE_NAME:
+        Ref: RelayGuardE2eStateTable
+    iamRoleStatements:
+      - Effect: Allow
+        Action: dynamodb:UpdateItem
+        Resource:
+          Fn::GetAtt: [RelayGuardE2eStateTable, Arn]
+    events:
+      - http:
+          method: POST
+          path: /_e2e/destination
+
+resources:
+  Conditions:
+    IsLocal:
+      Fn::Equals: ["${sls:stage}", "local"]
+
+  extensions:
+    E2eDestinationLogGroup:
+      Condition: IsLocal
+    ApiGatewayResourceE2e:
+      Condition: IsLocal
+    ApiGatewayResourceE2eDestination:
+      Condition: IsLocal
+    ApiGatewayMethodE2eDestinationPost:
+      Condition: IsLocal
+    E2eDestinationLambdaPermissionApiGateway:
+      Condition: IsLocal
+    E2eDestinationIamRoleLambdaExecution:
+      Condition: IsLocal
+
+  Resources:
+    RelayGuardE2eStateTable:
+      Type: AWS::DynamoDB::Table
+      Condition: IsLocal
+      Properties:
+        TableName: relayguard-${sls:stage}-e2e-state
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: PK
+            AttributeType: S
+          - AttributeName: SK
+            AttributeType: S
+        KeySchema:
+          - AttributeName: PK
+            KeyType: HASH
+          - AttributeName: SK
+            KeyType: RANGE
+
+    RelayGuardStateMachineLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: /aws/vendedlogs/states/relayguard-${sls:stage}
+        RetentionInDays: 7
+
+    RelayGuardStateMachineRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: relayguard-${sls:stage}-state-machine
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: states.amazonaws.com
+              Action: sts:AssumeRole
+        Policies:
+          - PolicyName: relayguard-workflow
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - lambda:InvokeFunction
+                  Resource:
+                    - Fn::GetAtt: [NormalizeLambdaFunction, Arn]
+                    - Fn::GetAtt: [DeliverLambdaFunction, Arn]
+                - Effect: Allow
+                  Action:
+                    - dynamodb:GetItem
+                    - dynamodb:PutItem
+                    - dynamodb:UpdateItem
+                  Resource: ${self:custom.tableArn}
+                - Effect: Allow
+                  Action: events:PutEvents
+                  Resource: ${self:custom.eventBusArn}
+                - Effect: Allow
+                  Action:
+                    - logs:CreateLogDelivery
+                    - logs:GetLogDelivery
+                    - logs:UpdateLogDelivery
+                    - logs:DeleteLogDelivery
+                    - logs:ListLogDeliveries
+                    - logs:PutResourcePolicy
+                    - logs:DescribeResourcePolicies
+                    - logs:DescribeLogGroups
+                  Resource: "*"
+
+    RelayGuardStateMachine:
+      Type: AWS::StepFunctions::StateMachine
+      Properties:
+        StateMachineName: relayguard-${sls:stage}
+        StateMachineType: STANDARD
+        RoleArn:
+          Fn::GetAtt: [RelayGuardStateMachineRole, Arn]
+        LoggingConfiguration:
+          Destinations:
+            - CloudWatchLogsLogGroup:
+                LogGroupArn:
+                  Fn::GetAtt: [RelayGuardStateMachineLogGroup, Arn]
+          IncludeExecutionData: false
+          Level: ALL
+        DefinitionSubstitutions:
+          JobsTableName: ${self:custom.tableName}
+          NormalizeFunctionArn:
+            Fn::GetAtt: [NormalizeLambdaFunction, Arn]
+          DeliverFunctionArn:
+            Fn::GetAtt: [DeliverLambdaFunction, Arn]
+          EventBusName: ${self:custom.eventBusName}
+        Definition: ${file(state-machine.asl.json)}
+
+    DeliveryFailureRule:
+      Type: AWS::Events::Rule
+      Properties:
+        EventBusName: ${self:custom.eventBusName}
+        EventPattern:
+          source: [relayguard]
+          detail-type: [DeliveryFailed]
+        Targets:
+          - Arn: ${self:custom.operationsTopicArn}
+            Id: operations-topic
+
+    OperationsTopicRulePermission:
+      Type: AWS::SNS::TopicPolicy
+      Properties:
+        Topics:
+          - ${self:custom.operationsTopicArn}
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: events.amazonaws.com
+              Action: sns:Publish
+              Resource: ${self:custom.operationsTopicArn}
+
+    ReconcileSchedulerRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: relayguard-${sls:stage}-reconcile-scheduler
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: scheduler.amazonaws.com
+              Action: sts:AssumeRole
+        Policies:
+          - PolicyName: invoke-reconciler
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action: lambda:InvokeFunction
+                  Resource:
+                    Fn::GetAtt: [ReconcileLambdaFunction, Arn]
+                - Effect: Allow
+                  Action: sqs:SendMessage
+                  Resource: ${self:custom.schedulerDlqArn}
+
+    ReconcileSchedule:
+      Type: AWS::Scheduler::Schedule
+      Properties:
+        Name: relayguard-${sls:stage}-reconcile
+        Description: Repairs accepted or queued jobs and flags stale running jobs.
+        FlexibleTimeWindow:
+          Mode: "OFF"
+        ScheduleExpression: rate(5 minutes)
+        State: ENABLED
+        Target:
+          Arn:
+            Fn::GetAtt: [ReconcileLambdaFunction, Arn]
+          RoleArn:
+            Fn::GetAtt: [ReconcileSchedulerRole, Arn]
+          DeadLetterConfig:
+            Arn: ${self:custom.schedulerDlqArn}
+
+  Outputs:
+    HttpApiEndpoint:
+      Value:
+        Fn::Join:
+          - ""
+          - - "https://"
+            - Ref: ApiGatewayRestApi
+            - ".execute-api.${aws:region}.amazonaws.com/${sls:stage}"
+    StateMachineArn:
+      Value:
+        Ref: RelayGuardStateMachine
+

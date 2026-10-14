@@ -1,0 +1,27 @@
+{
+  "name": "relayguard-serverless",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "test": ".venv/bin/python -m pytest",
+    "test:coverage": ".venv/bin/python -m pytest --cov=relayguard --cov-report=term-missing --cov-report=xml:coverage.xml --cov-report=html:htmlcov --cov-fail-under=90 --junitxml=test-results.xml",
+    "test:e2e": ".venv/bin/python -m pytest -m e2e tests/e2e",
+    "lint": ".venv/bin/ruff check .",
+    "format:check": ".venv/bin/ruff format --check .",
+    "security": ".venv/bin/bandit -q -r src && .venv/bin/pip-audit .",
+    "check": "npm run lint && npm run format:check && npm run test:coverage && npm run security",
+    "package": "serverless package --stage local",
+    "deploy:local": "serverless deploy --stage local",
+    "remove:local": "serverless remove --stage local"
+  },
+  "devDependencies": {
+    "serverless": "3.40.0",
+    "serverless-iam-roles-per-function": "3.2.0",
+    "serverless-localstack": "1.4.0"
+  },
+  "overrides": {
+    "adm-zip": "0.6.1",
+    "uuid": "11.1.1"
+  }
+}
+
