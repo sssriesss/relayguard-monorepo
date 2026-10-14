@@ -11,46 +11,53 @@ type RequestBody = {
 };
 
 class RequestValidationError extends Error {}
+class ServerConfigurationError extends Error {}
 
-function allowedOrigins(): Set<string> {
-  return new Set(
-    (process.env.RELAYGUARD_ALLOWED_API_ORIGINS || "")
-      .split(",")
-      .map((value) => value.trim())
-      .filter(Boolean),
-  );
-}
-
-function validatedBaseUrl(value: string): URL {
+function parseBaseUrl(
+  value: string,
+  ErrorType: typeof RequestValidationError | typeof ServerConfigurationError,
+): URL {
   let url: URL;
   try {
     url = new URL(value);
   } catch {
-    throw new RequestValidationError("Enter a valid RelayGuard API URL.");
+    throw new ErrorType("Enter a valid RelayGuard API base URL.");
   }
   if (
     !["http:", "https:"].includes(url.protocol) ||
     url.username ||
-    url.password
+    url.password ||
+    url.search ||
+    url.hash
   ) {
-    throw new RequestValidationError(
-      "The API URL must use HTTP or HTTPS without embedded credentials.",
+    throw new ErrorType(
+      "The API base URL must use HTTP or HTTPS without credentials, a query, or a fragment.",
     );
   }
-  const localHosts = new Set(["localhost", "127.0.0.1", "[::1]"]);
-  const allowed = allowedOrigins().has(url.origin);
-  if (
-    !allowed &&
-    !(process.env.NODE_ENV !== "production" && localHosts.has(url.hostname))
-  ) {
-    throw new RequestValidationError(
-      "This API origin is not allowed by the frontend server.",
-    );
-  }
-  url.pathname = url.pathname.replace(/\/$/, "");
-  url.search = "";
-  url.hash = "";
+  url.pathname = url.pathname.replace(/\/+$/, "") || "/";
   return url;
+}
+
+function configuredBaseUrls(): URL[] {
+  return (process.env.RELAYGUARD_ALLOWED_API_BASE_URLS || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .map((value) => parseBaseUrl(value, ServerConfigurationError));
+}
+
+function validatedBaseUrl(value: string): URL {
+  const requested = parseBaseUrl(value, RequestValidationError);
+  const configured = configuredBaseUrls().find(
+    (candidate) => candidate.href === requested.href,
+  );
+  if (!configured) {
+    throw new RequestValidationError(
+      "This API base URL is not allowed by the frontend server.",
+    );
+  }
+  // Return the server-owned configuration value, never the request-derived URL.
+  return new URL(configured.href);
 }
 
 function endpoint(base: URL, path: string): URL {
@@ -149,7 +156,13 @@ export async function POST(request: Request) {
       error instanceof Error ? error.message : "RelayGuard is unavailable.";
     const timeout = error instanceof Error && error.name === "TimeoutError";
     const status =
-      error instanceof RequestValidationError ? 400 : timeout ? 504 : 502;
+      error instanceof RequestValidationError
+        ? 400
+        : error instanceof ServerConfigurationError
+          ? 500
+          : timeout
+            ? 504
+            : 502;
     return NextResponse.json({ message }, { status });
   }
 }

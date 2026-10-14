@@ -106,6 +106,9 @@ jobs:
           npm ci --ignore-scripts
           python -m pip check
 
+      - name: Verify Serverless Framework migration
+        run: npm run framework:check
+
       - name: Lint and check formatting
         run: |
           ruff check .
@@ -127,8 +130,8 @@ jobs:
       - name: Audit Python dependencies
         run: pip-audit .
 
-      - name: Audit deployable Node.js dependencies
-        run: npm audit --omit=dev --audit-level=high
+      - name: Audit all Node.js dependencies
+        run: npm audit --audit-level=low
 
       - name: Upload backend reports
         if: always()

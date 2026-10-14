@@ -51,15 +51,16 @@ contract, so neither needs to read the other's state.
 
 Install these tools before running the full local environment:
 
-| Tool | Supported version | Purpose |
-| --- | --- | --- |
-| Python | 3.12 or newer | Application and tests |
-| Node.js | 20 LTS or newer | Serverless Framework |
-| pnpm | 9.15 or newer | Frontend package manager |
-| Terraform | 1.6 or newer, below 2.0 | Infrastructure modules |
-| Terragrunt | 1.x | Environment orchestration |
-| Docker | Current stable release | LocalStack runtime |
-| LocalStack auth token | Valid token | Local AWS services and Lambda execution |
+| Tool                             | Supported version       | Purpose                                 |
+| -------------------------------- | ----------------------- | --------------------------------------- |
+| Python                           | 3.12 or newer           | Application and tests                   |
+| Node.js                          | 20 LTS or newer         | Serverless Framework                    |
+| Serverless access or license key | Valid v4 key            | Backend packaging and deployment        |
+| pnpm                             | 9.15 or newer           | Frontend package manager                |
+| Terraform                        | 1.6 or newer, below 2.0 | Infrastructure modules                  |
+| Terragrunt                       | 1.x                     | Environment orchestration               |
+| Docker                           | Current stable release  | LocalStack runtime                      |
+| LocalStack auth token            | Valid token             | Local AWS services and Lambda execution |
 
 Git and a POSIX-compatible shell are also expected. Cloud deployments require
 credentials for the selected provider.
@@ -84,6 +85,7 @@ shell:
 
 ```sh
 export TF_VAR_auth_token='<your-localstack-token>'
+export SERVERLESS_ACCESS_KEY='<your-serverless-access-key>'
 cd iac/env/local/aws/applications/relayguard
 terragrunt run --all --non-interactive -- apply -auto-approve
 cd ../../../../../..

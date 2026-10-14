@@ -36,16 +36,18 @@ pnpm dev
 Open `http://localhost:3000` and enter the API base URL. For the LocalStack
 deployment, use the endpoint printed by `npm run deploy:local` in `backend/`.
 
-Development mode permits loopback API hosts automatically. For any other local
-or cloud API, list its exact origin in `.env.local`:
+List every permitted local or cloud API base URL in `.env.local`. Values must
+match the complete URL entered in the connection dialog, including any stage
+path:
 
 ```dotenv
-RELAYGUARD_ALLOWED_API_ORIGINS=https://example.execute-api.eu-west-1.amazonaws.com
+RELAYGUARD_ALLOWED_API_BASE_URLS=https://example.execute-api.eu-west-1.amazonaws.com/dev
 ```
 
-Multiple origins are comma-separated. The setting is an SSRF boundary for the
-server-side API adapter and is required for every non-loopback host. Restart the
-development server after changing it.
+Multiple base URLs are comma-separated. The adapter selects the destination
+from these server-owned values and never forwards to a request-provided URL.
+The setting is the SSRF boundary for every host, including loopback addresses.
+Restart the development server after changing it.
 
 ## Quality checks
 
@@ -92,5 +94,5 @@ src/
 ```
 
 The browser calls the local Next.js adapter at `/api/relayguard`. That adapter
-validates the configured origin, adds bearer authentication, creates webhook
+selects an exact configured base URL, adds bearer authentication, creates webhook
 HMAC signatures, and forwards only the four operations supported by RelayGuard.

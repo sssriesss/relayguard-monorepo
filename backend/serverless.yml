@@ -1,20 +1,11 @@
 service: relayguard
-frameworkVersion: "3.40.0"
+frameworkVersion: "4.43.0"
 configValidationMode: warn
 
 plugins:
-  - serverless-localstack
   - serverless-iam-roles-per-function
 
 custom:
-  localstack:
-    stages:
-      - local
-    host: http://127.0.0.1
-    edgePort: 4566
-    autostart: false
-    lambda:
-      mountCode: false
   tableName: ${ssm:/relayguard/${sls:stage}/infra/dynamodb/table_name}
   awsEndpointUrl: ${ssm:/relayguard/${sls:stage}/infra/aws/endpoint_url, ''}
   tableArn: ${ssm:/relayguard/${sls:stage}/infra/dynamodb/table_arn}

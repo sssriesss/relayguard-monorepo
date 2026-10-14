@@ -5,12 +5,12 @@ Terragrunt units for AWS, GCP, Azure, and LocalStack.
 
 ## Requirements
 
-| Tool | Version |
-| --- | --- |
-| Terraform | `>= 1.6, < 2.0` |
-| Terragrunt | `1.x` |
-| Docker | Current stable release for the local environment |
-| LocalStack auth token | Required for the complete local environment |
+| Tool                  | Version                                          |
+| --------------------- | ------------------------------------------------ |
+| Terraform             | `>= 1.6, < 2.0`                                  |
+| Terragrunt            | `1.x`                                            |
+| Docker                | Current stable release for the local environment |
+| LocalStack auth token | Required for the complete local environment      |
 
 Cloud deployments also require credentials for the target provider:
 
@@ -115,6 +115,7 @@ Terragrunt follows the dependency graph and creates:
 After the foundation is ready, deploy the application from `backend/`:
 
 ```sh
+export SERVERLESS_ACCESS_KEY='<your-serverless-access-key>'
 npm run deploy:local
 npm run test:e2e
 ```

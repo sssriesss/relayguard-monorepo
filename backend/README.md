@@ -26,6 +26,7 @@ the two stacks.
 
 - Python 3.12 or newer;
 - Node.js 20 LTS or newer and npm;
+- a Serverless Framework access key or license key for packaging and deployment;
 - the infrastructure requirements from [`iac/README.md`](../iac/README.md);
 - Docker and a LocalStack auth token for local E2E tests;
 - AWS credentials and a provisioned stage contract for real AWS deployments.
@@ -59,6 +60,7 @@ Provision the local foundation first, from the repository root:
 
 ```sh
 export TF_VAR_auth_token='<your-localstack-token>'
+export SERVERLESS_ACCESS_KEY='<your-serverless-access-key>'
 cd iac/env/local/aws/applications/relayguard
 terragrunt run --all --non-interactive -- apply -auto-approve
 cd ../../../../../../backend
@@ -70,6 +72,11 @@ Then package or deploy the Serverless application:
 npm run package
 npm run deploy:local
 ```
+
+Serverless Framework v4 requires `SERVERLESS_ACCESS_KEY` or
+`SERVERLESS_LICENSE_KEY`. The local commands route all AWS SDK requests to
+LocalStack through `AWS_ENDPOINT_URL`; override the default endpoint with
+`RELAYGUARD_AWS_ENDPOINT_URL` when necessary.
 
 Run the deployed E2E suite:
 
