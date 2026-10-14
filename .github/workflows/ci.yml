@@ -1,0 +1,299 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "22"
+  PYTHON_VERSION: "3.12"
+  TERRAFORM_VERSION: "1.16.5"
+  TERRAGRUNT_VERSION: "1.1.6"
+  TERRAGRUNT_SHA256: d75a80bb264758ba00dabcb17f4b507fcdab4ca90d9e41f96750df036bf69b04
+  TF_IN_AUTOMATION: "true"
+
+jobs:
+  workflow-policy:
+    name: Workflow and repository policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install actionlint
+        env:
+          ACTIONLINT_ARCHIVE: actionlint_1.7.12_linux_amd64.tar.gz
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          ACTIONLINT_VERSION: 1.7.12
+        run: |
+          curl --fail --silent --show-error --location \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${ACTIONLINT_ARCHIVE}" \
+            --output "$RUNNER_TEMP/$ACTIONLINT_ARCHIVE"
+          echo "$ACTIONLINT_SHA256  $RUNNER_TEMP/$ACTIONLINT_ARCHIVE" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/$ACTIONLINT_ARCHIVE" -C "$RUNNER_TEMP" actionlint
+
+      - name: Lint GitHub Actions workflows
+        run: "$RUNNER_TEMP/actionlint -color"
+
+      - name: Require immutable action references
+        run: |
+          invalid_references=$(grep -R --include='*.yml' -E '^[[:space:]]*uses:[[:space:]]+[^.].*@' .github/workflows \
+            | grep -Ev '@[0-9a-f]{40}([[:space:]]+#.*)?$' || true)
+          if [[ -n "$invalid_references" ]]; then
+            echo "External actions must be pinned to a full commit SHA:"
+            echo "$invalid_references"
+            exit 1
+          fi
+
+      - name: Validate repository files
+        run: |
+          git diff --check
+          jq empty backend/state-machine.asl.json
+
+  backend:
+    name: Backend quality gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --disable-pip-version-check -e '.[dev]'
+          npm ci --ignore-scripts
+          python -m pip check
+
+      - name: Lint and check formatting
+        run: |
+          ruff check .
+          ruff format --check .
+
+      - name: Run unit tests with coverage
+        run: |
+          python -m pytest \
+            --cov=relayguard \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml \
+            --cov-report=html:htmlcov \
+            --cov-fail-under=90 \
+            --junitxml=test-results.xml
+
+      - name: Static application security scan
+        run: bandit -q -r src
+
+      - name: Audit Python dependencies
+        run: pip-audit .
+
+      - name: Audit deployable Node.js dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Upload backend reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: backend-test-and-coverage-reports
+          path: |
+            backend/coverage.xml
+            backend/htmlcov/
+            backend/test-results.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+  frontend:
+    name: Frontend quality gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 9.15.9
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Check formatting, lint, and types
+        run: |
+          pnpm format:check
+          pnpm lint
+          pnpm typecheck
+
+      - name: Run unit tests with coverage
+        run: pnpm test:coverage
+
+      - name: Build production application
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+        run: pnpm build
+
+      - name: Audit production dependencies
+        run: pnpm audit --prod --audit-level=high
+
+      - name: Upload frontend coverage report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: frontend-coverage-report
+          path: frontend/coverage/
+          if-no-files-found: warn
+          retention-days: 14
+
+  infrastructure:
+    name: Infrastructure quality gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: iac
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Set up TFLint
+        uses: terraform-linters/setup-tflint@6ffdbaa3be476b3431f7275c26966ef32ff60337 # v6.3.2
+        with:
+          tflint_version: v0.64.0
+          checksums: cca9d13e2e1d7a2c627af60ff899a3c9b74212899416aeb96ec764d2ef954537
+
+      - name: Install Terragrunt
+        env:
+          TERRAGRUNT_DOWNLOAD: https://github.com/gruntwork-io/terragrunt/releases/download/v${{ env.TERRAGRUNT_VERSION }}/terragrunt_linux_amd64
+        run: |
+          curl --fail --silent --show-error --location \
+            "$TERRAGRUNT_DOWNLOAD" \
+            --output "$RUNNER_TEMP/terragrunt"
+          echo "$TERRAGRUNT_SHA256  $RUNNER_TEMP/terragrunt" | sha256sum --check
+          chmod +x "$RUNNER_TEMP/terragrunt"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+      - name: Verify tool versions
+        run: |
+          terraform version
+          terragrunt --version
+          tflint --version
+
+      - name: Check Terraform and Terragrunt formatting
+        run: |
+          terraform fmt -check -recursive terraform-modules
+          terragrunt hcl fmt --check
+
+      - name: Validate Terragrunt configuration
+        run: terragrunt hcl validate
+
+      - name: Validate every Terraform module
+        env:
+          TF_PLUGIN_CACHE_DIR: ${{ runner.temp }}/terraform-plugin-cache
+        run: |
+          mkdir -p "$TF_PLUGIN_CACHE_DIR"
+          while IFS= read -r module; do
+            echo "::group::terraform validate $module"
+            terraform -chdir="$module" init -backend=false -input=false -no-color
+            terraform -chdir="$module" validate -no-color
+            echo "::endgroup::"
+          done < <(find terraform-modules -mindepth 2 -maxdepth 2 -type d | sort)
+
+      - name: Lint every Terraform module
+        run: |
+          while IFS= read -r module; do
+            echo "::group::tflint $module"
+            tflint --chdir="$module" --minimum-failure-severity=warning
+            echo "::endgroup::"
+          done < <(find terraform-modules -mindepth 2 -maxdepth 2 -type d | sort)
+
+  ci-success:
+    name: CI success
+    if: always()
+    needs: [workflow-policy, backend, frontend, infrastructure]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require every quality gate
+        env:
+          BACKEND_RESULT: ${{ needs.backend.result }}
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+          INFRASTRUCTURE_RESULT: ${{ needs.infrastructure.result }}
+          WORKFLOW_POLICY_RESULT: ${{ needs.workflow-policy.result }}
+        run: |
+          for result in "$WORKFLOW_POLICY_RESULT" "$BACKEND_RESULT" "$FRONTEND_RESULT" "$INFRASTRUCTURE_RESULT"; do
+            if [[ "$result" != "success" ]]; then
+              echo "A required CI job finished with status: $result"
+              exit 1
+            fi
+          done

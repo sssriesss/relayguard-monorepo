@@ -1,0 +1,197 @@
+{
+  "StartAt": "LoadJob",
+  "States": {
+    "LoadJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:getItem",
+      "Parameters": {
+        "TableName": "${JobsTableName}",
+        "Key": {
+          "PK": {"S.$": "States.Format('JOB#{}', $.job_id)"},
+          "SK": {"S": "META"}
+        },
+        "ConsistentRead": true
+      },
+      "ResultPath": "$.job",
+      "Next": "RecordExecution",
+      "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.failure", "Next": "MarkFailed"}]
+    },
+    "RecordExecution": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${JobsTableName}",
+        "Key": {
+          "PK": {"S.$": "States.Format('JOB#{}', $.job_id)"},
+          "SK": {"S": "META"}
+        },
+        "UpdateExpression": "SET execution_arn = :execution",
+        "ConditionExpression": "#status = :running AND attempt = :attempt",
+        "ExpressionAttributeNames": {"#status": "status"},
+        "ExpressionAttributeValues": {
+          ":execution": {"S.$": "$$.Execution.Id"},
+          ":running": {"S": "RUNNING"},
+          ":attempt": {"N.$": "States.Format('{}', $.attempt)"}
+        }
+      },
+      "ResultPath": "$.record_execution",
+      "Next": "NormalizeEvent",
+      "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.failure", "Next": "MarkFailed"}]
+    },
+    "NormalizeEvent": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${NormalizeFunctionArn}",
+        "Payload": {"item.$": "$.job.Item"}
+      },
+      "ResultSelector": {"normalized.$": "$.Payload"},
+      "ResultPath": "$.delivery",
+      "Next": "DeliverWebhook",
+      "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.failure", "Next": "MarkFailed"}]
+    },
+    "DeliverWebhook": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${DeliverFunctionArn}",
+        "Payload.$": "$.delivery.normalized"
+      },
+      "ResultPath": "$.delivery_result",
+      "Retry": [{
+        "ErrorEquals": ["TransientDeliveryError", "Lambda.ServiceException", "Lambda.TooManyRequestsException"],
+        "IntervalSeconds": 2,
+        "BackoffRate": 2.0,
+        "MaxAttempts": 3,
+        "JitterStrategy": "FULL"
+      }],
+      "Next": "MarkSucceeded",
+      "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.failure", "Next": "MarkFailed"}]
+    },
+    "MarkSucceeded": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${JobsTableName}",
+        "Key": {
+          "PK": {"S.$": "States.Format('JOB#{}', $.job_id)"},
+          "SK": {"S": "META"}
+        },
+        "UpdateExpression": "SET #status = :succeeded, updated_at = :now REMOVE GSI1PK, GSI1SK",
+        "ConditionExpression": "#status = :running AND attempt = :attempt",
+        "ExpressionAttributeNames": {"#status": "status"},
+        "ExpressionAttributeValues": {
+          ":succeeded": {"S": "SUCCEEDED"},
+          ":running": {"S": "RUNNING"},
+          ":attempt": {"N.$": "States.Format('{}', $.attempt)"},
+          ":now": {"S.$": "$$.State.EnteredTime"}
+        }
+      },
+      "ResultPath": "$.status_update",
+      "Next": "RecordSuccess"
+    },
+    "RecordSuccess": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:putItem",
+      "Parameters": {
+        "TableName": "${JobsTableName}",
+        "Item": {
+          "PK": {"S.$": "States.Format('JOB#{}', $.job_id)"},
+          "SK": {"S.$": "States.Format('EVENT#{}#succeeded-{}', $$.State.EnteredTime, $.attempt)"},
+          "type": {"S": "DeliverySucceeded"},
+          "outcome": {"S": "succeeded"},
+          "attempt": {"N.$": "States.Format('{}', $.attempt)"},
+          "created_at": {"S.$": "$$.State.EnteredTime"},
+          "expires_at": {"N.$": "$.job.Item.expires_at.N"}
+        }
+      },
+      "ResultPath": "$.history_write",
+      "Next": "PrepareSuccessEvent"
+    },
+    "PrepareSuccessEvent": {
+      "Type": "Pass",
+      "Parameters": {
+        "job_id.$": "$.job_id",
+        "attempt.$": "$.attempt"
+      },
+      "ResultPath": "$.event_detail",
+      "Next": "PublishSuccess"
+    },
+    "PublishSuccess": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::events:putEvents",
+      "Parameters": {
+        "Entries": [{
+          "EventBusName": "${EventBusName}",
+          "Source": "relayguard",
+          "DetailType": "DeliverySucceeded",
+          "Detail.$": "States.JsonToString($.event_detail)"
+        }]
+      },
+      "End": true
+    },
+    "MarkFailed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${JobsTableName}",
+        "Key": {
+          "PK": {"S.$": "States.Format('JOB#{}', $.job_id)"},
+          "SK": {"S": "META"}
+        },
+        "UpdateExpression": "SET #status = :failed, updated_at = :now, error_code = :error REMOVE GSI1PK, GSI1SK",
+        "ExpressionAttributeNames": {"#status": "status"},
+        "ExpressionAttributeValues": {
+          ":failed": {"S": "FAILED"},
+          ":now": {"S.$": "$$.State.EnteredTime"},
+          ":error": {"S.$": "$.failure.Error"}
+        }
+      },
+      "ResultPath": "$.status_update",
+      "Next": "RecordFailure"
+    },
+    "RecordFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:putItem",
+      "Parameters": {
+        "TableName": "${JobsTableName}",
+        "Item": {
+          "PK": {"S.$": "States.Format('JOB#{}', $.job_id)"},
+          "SK": {"S.$": "States.Format('EVENT#{}#failed-{}', $$.State.EnteredTime, $.attempt)"},
+          "type": {"S": "DeliveryFailed"},
+          "outcome": {"S": "failed"},
+          "attempt": {"N.$": "States.Format('{}', $.attempt)"},
+          "created_at": {"S.$": "$$.State.EnteredTime"},
+          "error_code": {"S.$": "$.failure.Error"},
+          "expires_at": {"N.$": "$.job.Item.expires_at.N"}
+        }
+      },
+      "ResultPath": "$.history_write",
+      "Next": "PrepareFailureEvent"
+    },
+    "PrepareFailureEvent": {
+      "Type": "Pass",
+      "Parameters": {
+        "job_id.$": "$.job_id",
+        "attempt.$": "$.attempt",
+        "error_code.$": "$.failure.Error"
+      },
+      "ResultPath": "$.event_detail",
+      "Next": "PublishFailure"
+    },
+    "PublishFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::events:putEvents",
+      "Parameters": {
+        "Entries": [{
+          "EventBusName": "${EventBusName}",
+          "Source": "relayguard",
+          "DetailType": "DeliveryFailed",
+          "Detail.$": "States.JsonToString($.event_detail)"
+        }]
+      },
+      "End": true
+    }
+  }
+}
+

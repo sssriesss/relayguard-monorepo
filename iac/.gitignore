@@ -1,0 +1,14 @@
+.terragrunt-cache/
+.terraform/
+.terraform.lock.hcl
+/localstack
+.state/
+/env/remote-state/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+
+provider.generated.tf
+backend.generated.tf

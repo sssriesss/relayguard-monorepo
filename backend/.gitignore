@@ -1,0 +1,12 @@
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+test-results.xml
+.serverless/
+.venv/
+__pycache__/
+*.egg-info/
+*.pyc
+node_modules/
