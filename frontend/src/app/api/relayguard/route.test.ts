@@ -30,13 +30,28 @@ describe("RelayGuard API adapter", () => {
     const response = await POST(request({ operation: "health", connection }));
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toEqual({
-      message: "This API origin is not allowed by the frontend server.",
+      message: "This API base URL is not allowed by the frontend server.",
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("blocks an unconfigured path on an otherwise allowed origin", async () => {
+    vi.stubEnv(
+      "RELAYGUARD_ALLOWED_API_BASE_URLS",
+      "https://api.example.com/production",
+    );
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const response = await POST(request({ operation: "health", connection }));
+    expect(response.status).toBe(400);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("forwards job reads with an encoded ID and bearer token", async () => {
-    vi.stubEnv("RELAYGUARD_ALLOWED_API_ORIGINS", "https://api.example.com");
+    vi.stubEnv(
+      "RELAYGUARD_ALLOWED_API_BASE_URLS",
+      "https://api.example.com/stage",
+    );
     const fetchMock = vi
       .fn()
       .mockResolvedValue(
@@ -58,7 +73,10 @@ describe("RelayGuard API adapter", () => {
   });
 
   it("signs the exact serialized webhook body", async () => {
-    vi.stubEnv("RELAYGUARD_ALLOWED_API_ORIGINS", "https://api.example.com");
+    vi.stubEnv(
+      "RELAYGUARD_ALLOWED_API_BASE_URLS",
+      "https://api.example.com/stage",
+    );
     vi.spyOn(Date, "now").mockReturnValue(1_797_000_000_000);
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ job_id: "job-1", duplicate: false }), {
@@ -98,7 +116,10 @@ describe("RelayGuard API adapter", () => {
   });
 
   it("requires credentials for protected operations", async () => {
-    vi.stubEnv("RELAYGUARD_ALLOWED_API_ORIGINS", "https://api.example.com");
+    vi.stubEnv(
+      "RELAYGUARD_ALLOWED_API_BASE_URLS",
+      "https://api.example.com/stage",
+    );
     const response = await POST(
       request({
         operation: "getJob",
