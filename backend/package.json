@@ -16,7 +16,7 @@
     "remove:local": "AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=eu-west-1 AWS_ENDPOINT_URL=${RELAYGUARD_AWS_ENDPOINT_URL:-http://localhost.localstack.cloud:4566} SLS_TELEMETRY_DISABLED=1 serverless remove --stage local"
   },
   "devDependencies": {
-    "serverless": "4.43.0",
+    "serverless": "4.46.0",
     "serverless-iam-roles-per-function": "3.2.0"
   }
 }
